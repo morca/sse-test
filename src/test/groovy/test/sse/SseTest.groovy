@@ -1,73 +1,70 @@
 package test.sse
 
-import javax.ws.rs.client.Client
-import javax.ws.rs.client.ClientBuilder
-import javax.ws.rs.client.WebTarget
-import java.util.concurrent.CountDownLatch
+import javax.ws.rs.client.*
+import java.util.concurrent.*
 
-import groovy.util.logging.Slf4j
+import groovy.util.logging.*
 import groovyx.net.http.*
-import org.glassfish.jersey.media.sse.EventInput
-import org.glassfish.jersey.media.sse.InboundEvent
+import org.apache.http.impl.client.*
+import org.glassfish.jersey.media.sse.*
 import org.junit.*
+import org.junit.runners.*
 
+@FixMethodOrder(MethodSorters.NAME_ASCENDING)
 class SseTest {
 
-    static Random random = new Random()
-
     RESTClient getClient(url) {
+        HttpClientBuilder.create().disableAutomaticRetries().build();
         RESTClient restClient = new RESTClient(url)
+        if (restClient.client instanceof AbstractHttpClient) {
+            ((AbstractHttpClient) restClient.client).setHttpRequestRetryHandler(new DefaultHttpRequestRetryHandler(0, false))
+        }
+        println restClient.client.class
         restClient.ignoreSSLIssues()
         restClient.encoder.charset = "UTF-8"
-		restClient.headers['Accept-Language'] = 'de'
+        restClient.headers['Accept-Language'] = 'de'
         return restClient;
     }
 
     @Test
-    void testSimpleRequest() {
-        def thread = new Thread(new SimpleRquest("one", "http://localhost:8080", "/long"))
-        thread.start()
-        thread.join()
+    void t1_testSimpleRequest() throws Exception {
+        new SimpleRequest("one", "http://localhost:8080", "/long").call()
     }
 
     @Test
-    public void testManySimpleRequests() throws Exception {
-        def allThreads = []
+    public void t4_testManySimpleRequests() throws Exception {
+        def results = []
+        ExecutorService executorService = Executors.newCachedThreadPool()
         for (int i = 0; i < 20; i++) {
-            def thread = new Thread(new SimpleRquest("cient:" + i, "http://localhost:8080", "/long", ["length": "20"]))
-            allThreads << thread
-            thread.start()
+            results << executorService.submit(new SimpleRequest("cient:" + i, "http://localhost:8080", "/long", ["length": "20"]))
         }
-        allThreads.each {it.join()}
+        results.each { it.get() }
     }
 
     @Test
-    void testSimpleSseRequest() {
-        def thread = new Thread(new SimpleRquest("one", "http://localhost:8080", "/sse"))
-        thread.start()
-        thread.join()
+    void t2_testSimpleSseRequest() throws Exception {
+        new SimpleRequest("one", "http://localhost:8080", "/sse", ["delay": "10", "count": "10"]).call()
     }
 
     @Test
-    public void testManySimpleSseRequests() throws Exception {
-        def allThreads = []
+    public void t5_testManySimpleSseRequests() throws Exception {
+        def results = []
+        ExecutorService executorService = Executors.newCachedThreadPool()
         for (int i = 0; i < 20; i++) {
-            def thread = new Thread(new SimpleRquest("cient:" + i, "http://localhost:8080", "/sse", ["delay": "1", "count": "10"]))
-            allThreads << thread
-            thread.start()
+            results << executorService.submit(new SimpleRequest("cient:" + i, "http://localhost:8080", "/sse", ["delay": "10", "count": "10"]))
         }
-        allThreads.each {it.join()}
-
+        results.each { it.get() }
     }
 
-    class SimpleRquest implements  Runnable {
+    @Slf4j
+    class SimpleRequest implements Callable<Void> {
 
         String clientName
         String baseurl
         String path
         def query = [:]
 
-        SimpleRquest(clientName, baseurl, path, query = [:]) {
+        SimpleRequest(clientName, baseurl, path, query = [:]) {
             this.clientName = clientName
             this.baseurl = baseurl
             this.path = path
@@ -75,7 +72,7 @@ class SseTest {
         }
 
         @Override
-        void run() {
+        Void call() throws Exception {
             RESTClient client = getClient(baseurl)
             client.get(
                     path: path,
@@ -84,33 +81,29 @@ class SseTest {
             ) { resp, reader ->
                 System.out << reader
             }
+            return null
         }
-    }
-    @Test
-    public void testWithOneEventsListener() throws Exception {
-        EditorEventsListener eel = new EditorEventsListener("one", "http://localhost:8080/sse?delay=100", "*/*", 5, null)
-        def thread = new Thread(eel)
-        thread.start()
-        thread.join()
     }
 
     @Test
-    public void testWithManyEventsListeners() throws Exception {
+    public void t3_testWithOneEventsListener() throws Exception {
+        new SseListener("one", "http://localhost:8080/sse?delay=100", "*/*", 5, null).call()
+    }
+
+    @Test
+    public void t6_testWithManyEventsListeners() throws Exception {
         def latch = new CountDownLatch(1)
-        latch.countDown()
-        def allThreads = []
-        for (int i = 0; i < 20; i++) {
-            EditorEventsListener eel = new EditorEventsListener("client " + i, "http://localhost:8080/sse?delay=100", "*/*", 5, latch)
-            def thread = new Thread(eel)
-            thread.start()
-            allThreads << thread
+        def results = []
+        ExecutorService executorService = Executors.newCachedThreadPool()
+        for (int i = 0; i < 30; i++) {
+            results << executorService.submit(new SseListener("client " + i, "http://localhost:8080/sse?delay=100", "*/*", 5, latch))
         }
-
-        allThreads.each {it.join() }
+        latch.countDown()
+        results.each { it.get() }
     }
 
     @Slf4j
-    class EditorEventsListener implements Runnable {
+    class SseListener implements Callable<Void> {
         Client client
         WebTarget target
         EventInput eventInput
@@ -121,7 +114,7 @@ class SseTest {
         int eventsCount = 0
         CountDownLatch latch
 
-        EditorEventsListener(clientName, eventsUrl, mediaType, int closeAfterNumberOfEvents, CountDownLatch latch) {
+        SseListener(clientName, eventsUrl, mediaType, int closeAfterNumberOfEvents, CountDownLatch latch) {
             this.clientName = clientName
             this.mediaType = mediaType
             this.closeAfterNumberOfEvents = closeAfterNumberOfEvents
@@ -131,12 +124,11 @@ class SseTest {
         }
 
         @Override
-        void run() {
-            latch != null && latch.await()
-            Thread.sleep(random.nextInt(100))
+        Void call() throws Exception {
+            latch?.await()
             try {
                 log.info("client <" + clientName + "> starts here")
-                target= client.target(eventsUrl).queryParam("mediaType", mediaType);
+                target = client.target(eventsUrl).queryParam("mediaType", mediaType);
                 eventInput = target.request().get(EventInput.class)
                 while (!eventInput.isClosed() && !Thread.currentThread().isInterrupted()) {
                     final InboundEvent inboundEvent = eventInput.read();
@@ -146,8 +138,11 @@ class SseTest {
                     }
                     process(inboundEvent)
                 }
+                log.info("client <" + clientName + "> ends here")
+                return null
             } catch (Exception e) {
                 log.info("client <" + clientName + "> ends with exception", e)
+                throw e
             }
         }
 
@@ -155,7 +150,6 @@ class SseTest {
             eventsCount++
             if (eventsCount >= closeAfterNumberOfEvents) {
                 eventInput.close()
-                log.info("client <" + clientName + "> ends here")
             }
         }
 

@@ -54,3 +54,5 @@ dependencies {
     compile "org.hamcrest:hamcrest-library:"
     testCompile("junit:junit")
 }
+
+test.outputs.upToDateWhen {false}
